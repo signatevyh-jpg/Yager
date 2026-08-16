@@ -1,0 +1,322 @@
+/**
+ * PoyetAPI — единственный модуль, с которым говорит UI (auth.js, app.js).
+ * Режим переключается в config.js через CONFIG.USE_MOCK:
+ *
+ *  MOCK: всё живёт в localStorage браузера — для демонстрации интерфейса
+ *        без сервера, без реального обмена между людьми.
+ *
+ *  REAL: полноценные запросы к бэкенду (см. poyet-backend/, FastAPI +
+ *        PostgreSQL + WebSocket) — сообщения реально доходят от одного
+ *        зарегистрированного пользователя к другому.
+ *
+ * Контракт запросов и формат ответов описаны в poyet-backend/README.md.
+ */
+
+const PoyetAPI = (() => {
+
+  const bus = new EventTarget(); // общая шина событий и для mock, и для real (WebSocket сюда же эмитит)
+
+  function emit(type, detail) {
+    bus.dispatchEvent(new CustomEvent(type, { detail }));
+  }
+  function on(type, handler) {
+    const wrapped = (e) => handler(e.detail);
+    bus.addEventListener(type, wrapped);
+    return () => bus.removeEventListener(type, wrapped);
+  }
+
+  // Подписки на события — общие для обоих режимов, чтобы app.js
+  // не знал, откуда именно пришло событие (localStorage-эмуляция
+  // или настоящий WebSocket).
+  const shared = {
+    onMessage: (handler) => on('message', handler),
+    onMessageStatus: (handler) => on('message-status', handler),
+    onTyping: (handler) => on('typing', handler),
+    onPresence: (handler) => on('presence', handler),
+  };
+
+  // =========================================================
+  // MOCK — данные в localStorage, для демо без бэкенда
+  // =========================================================
+
+  const LS_USERS = 'poyet_users';
+  const LS_SESSION = 'poyet_session';
+  const LS_CHATS_PREFIX = 'poyet_chats_';
+  const LS_MESSAGES_PREFIX = 'poyet_msgs_';
+
+  async function sha256(text) {
+    const enc = new TextEncoder().encode(text);
+    const digest = await crypto.subtle.digest('SHA-256', enc);
+    return Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('');
+  }
+  function readJSON(key, fallback) {
+    try { return JSON.parse(localStorage.getItem(key)) ?? fallback; }
+    catch { return fallback; }
+  }
+  function writeJSON(key, value) {
+    localStorage.setItem(key, JSON.stringify(value));
+  }
+  function uid(prefix = 'id') {
+    return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  }
+  function publicUser(user) {
+    return { id: user.id, username: user.username, displayName: user.displayName };
+  }
+
+  const mock = {
+    ...shared,
+
+    async register(username, password) {
+      username = username.trim();
+      if (username.length < 3) throw new Error('Имя пользователя — минимум 3 символа');
+      if (password.length < 4) throw new Error('Пароль — минимум 4 символа');
+      const users = readJSON(LS_USERS, []);
+      if (users.some(u => u.username.toLowerCase() === username.toLowerCase())) {
+        throw new Error('Это имя пользователя уже занято');
+      }
+      const passwordHash = await sha256(password + '::' + username.toLowerCase());
+      const user = { id: uid('user'), username, passwordHash, displayName: username, createdAt: new Date().toISOString() };
+      users.push(user);
+      writeJSON(LS_USERS, users);
+      writeJSON(LS_SESSION, { userId: user.id });
+      seedChatsForUser(user.id);
+      return publicUser(user);
+    },
+
+    async login(username, password) {
+      const users = readJSON(LS_USERS, []);
+      const user = users.find(u => u.username.toLowerCase() === username.trim().toLowerCase());
+      if (!user) throw new Error('Пользователь не найден');
+      const passwordHash = await sha256(password + '::' + user.username.toLowerCase());
+      if (passwordHash !== user.passwordHash) throw new Error('Неверный пароль');
+      writeJSON(LS_SESSION, { userId: user.id });
+      if (!readJSON(LS_CHATS_PREFIX + user.id, null)) seedChatsForUser(user.id);
+      return publicUser(user);
+    },
+
+    async logout() { localStorage.removeItem(LS_SESSION); },
+
+    async getCurrentUser() {
+      const session = readJSON(LS_SESSION, null);
+      if (!session) return null;
+      const users = readJSON(LS_USERS, []);
+      const user = users.find(u => u.id === session.userId);
+      return user ? publicUser(user) : null;
+    },
+
+    async getChats() {
+      const session = readJSON(LS_SESSION, null);
+      if (!session) return [];
+      return readJSON(LS_CHATS_PREFIX + session.userId, []);
+    },
+
+    async getMessages(chatId) {
+      return readJSON(LS_MESSAGES_PREFIX + chatId, []);
+    },
+
+    async sendMessage(chatId, text) {
+      const session = readJSON(LS_SESSION, null);
+      if (!session) throw new Error('Не авторизован');
+      const messages = readJSON(LS_MESSAGES_PREFIX + chatId, []);
+      const message = { id: uid('msg'), chatId, senderId: session.userId, text, createdAt: new Date().toISOString(), status: 'sent' };
+      messages.push(message);
+      writeJSON(LS_MESSAGES_PREFIX + chatId, messages);
+      touchChat(session.userId, chatId, message);
+      emit('message', { chatId, message });
+
+      setTimeout(() => {
+        message.status = 'read';
+        writeJSON(LS_MESSAGES_PREFIX + chatId, messages);
+        emit('message-status', { chatId, messageId: message.id, status: 'read' });
+      }, 600);
+
+      maybeAutoReply(session.userId, chatId);
+      return message;
+    },
+
+    async markRead(chatId) {
+      const chats = readJSON(LS_CHATS_PREFIX + (readJSON(LS_SESSION, {}) || {}).userId, []);
+      const chat = chats.find(c => c.id === chatId);
+      if (chat) { chat.unread = 0; writeJSON(LS_CHATS_PREFIX + readJSON(LS_SESSION, {}).userId, chats); }
+    },
+
+    async startChat() {
+      throw new Error('В демо-режиме нельзя написать реальному пользователю — подключите бэкенд (CONFIG.USE_MOCK = false)');
+    },
+
+    sendTyping() { /* в mock-режиме печатание собеседника имитируется само по себе */ },
+  };
+
+  function seedChatsForUser(userId) {
+    const chats = MOCK_CONTACTS.map(c => ({
+      id: uid('chat'), contactId: c.id, name: c.name, online: !!c.online,
+      isGroup: !!c.isGroup, isBot: !!c.isBot, lastMessageAt: new Date().toISOString(),
+    }));
+    writeJSON(LS_CHATS_PREFIX + userId, chats);
+    chats.forEach((chat, i) => {
+      const contact = MOCK_CONTACTS[i];
+      const seedMsgs = contact.seed.map((text, j) => ({
+        id: uid('msg'), chatId: chat.id, senderId: chat.contactId, text,
+        createdAt: new Date(Date.now() - (contact.seed.length - j) * 3600000).toISOString(), status: 'read',
+      }));
+      writeJSON(LS_MESSAGES_PREFIX + chat.id, seedMsgs);
+    });
+  }
+  function touchChat(userId, chatId, message) {
+    const chats = readJSON(LS_CHATS_PREFIX + userId, []);
+    const chat = chats.find(c => c.id === chatId);
+    if (chat) { chat.lastMessageAt = message.createdAt; writeJSON(LS_CHATS_PREFIX + userId, chats); }
+  }
+  function maybeAutoReply(userId, chatId) {
+    const chats = readJSON(LS_CHATS_PREFIX + userId, []);
+    const chat = chats.find(c => c.id === chatId);
+    if (!chat) return;
+    setTimeout(() => emit('typing', { chatId, userId: chat.contactId, isTyping: true }), 500);
+    setTimeout(() => {
+      emit('typing', { chatId, userId: chat.contactId, isTyping: false });
+      const messages = readJSON(LS_MESSAGES_PREFIX + chatId, []);
+      const reply = {
+        id: uid('msg'), chatId, senderId: chat.contactId,
+        text: AUTO_REPLIES[Math.floor(Math.random() * AUTO_REPLIES.length)],
+        createdAt: new Date().toISOString(), status: 'read',
+      };
+      messages.push(reply);
+      writeJSON(LS_MESSAGES_PREFIX + chatId, messages);
+      touchChat(userId, chatId, reply);
+      emit('message', { chatId, message: reply });
+    }, 500 + 1300);
+  }
+
+  // =========================================================
+  // REAL — настоящий бэкенд (FastAPI + PostgreSQL + WebSocket)
+  // =========================================================
+
+  const LS_TOKEN = 'poyet_token';
+  let socket = null;
+  let socketReconnectTimer = null;
+
+  function authHeaders() {
+    const token = localStorage.getItem(LS_TOKEN);
+    return token ? { Authorization: `Bearer ${token}` } : {};
+  }
+
+  async function apiFetch(path, options = {}) {
+    const res = await fetch(`${CONFIG.API_BASE_URL}${path}`, {
+      ...options,
+      headers: {
+        'Content-Type': 'application/json',
+        ...authHeaders(),
+        ...(options.headers || {}),
+      },
+    });
+    if (!res.ok) {
+      let message = `Ошибка запроса (${res.status})`;
+      try { message = (await res.json()).detail || message; } catch { /* noop */ }
+      throw new Error(message);
+    }
+    if (res.status === 204) return null;
+    return res.json();
+  }
+
+  function connectSocket() {
+    const token = localStorage.getItem(LS_TOKEN);
+    if (!token || !CONFIG.WS_URL) return;
+    if (socket && socket.readyState <= 1) return; // уже подключаемся/подключены
+
+    socket = new WebSocket(`${CONFIG.WS_URL}?token=${encodeURIComponent(token)}`);
+
+    socket.addEventListener('message', (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data.type === 'message') emit('message', { chatId: data.chatId, message: data.message });
+        else if (data.type === 'typing') emit('typing', { chatId: data.chatId, userId: data.userId, isTyping: data.isTyping });
+        else if (data.type === 'presence') emit('presence', { userId: data.userId, online: data.online });
+      } catch { /* игнорируем некорректные пакеты */ }
+    });
+
+    socket.addEventListener('close', () => {
+      socket = null;
+      const token = localStorage.getItem(LS_TOKEN);
+      if (token) {
+        clearTimeout(socketReconnectTimer);
+        socketReconnectTimer = setTimeout(connectSocket, 2000); // авто-переподключение
+      }
+    });
+  }
+
+  function disconnectSocket() {
+    clearTimeout(socketReconnectTimer);
+    if (socket) { socket.close(); socket = null; }
+  }
+
+  const real = {
+    ...shared,
+
+    async register(username, password) {
+      const { token, user } = await apiFetch('/api/auth/register', {
+        method: 'POST', body: JSON.stringify({ username, password }),
+      });
+      localStorage.setItem(LS_TOKEN, token);
+      connectSocket();
+      return user;
+    },
+
+    async login(username, password) {
+      const { token, user } = await apiFetch('/api/auth/login', {
+        method: 'POST', body: JSON.stringify({ username, password }),
+      });
+      localStorage.setItem(LS_TOKEN, token);
+      connectSocket();
+      return user;
+    },
+
+    async logout() {
+      disconnectSocket();
+      localStorage.removeItem(LS_TOKEN);
+    },
+
+    async getCurrentUser() {
+      if (!localStorage.getItem(LS_TOKEN)) return null;
+      try {
+        const user = await apiFetch('/api/auth/me');
+        connectSocket();
+        return user;
+      } catch {
+        localStorage.removeItem(LS_TOKEN);
+        return null;
+      }
+    },
+
+    async getChats() {
+      return apiFetch('/api/chats');
+    },
+
+    async getMessages(chatId) {
+      return apiFetch(`/api/chats/${encodeURIComponent(chatId)}/messages`);
+    },
+
+    async sendMessage(chatId, text) {
+      // Сервер сам разошлёт событие 'message' всем участникам чата через
+      // WebSocket (включая отправителя) — поэтому здесь не эмитим вручную.
+      return apiFetch(`/api/chats/${encodeURIComponent(chatId)}/messages`, {
+        method: 'POST', body: JSON.stringify({ text }),
+      });
+    },
+
+    async markRead(chatId) {
+      return apiFetch(`/api/chats/${encodeURIComponent(chatId)}/read`, { method: 'POST' });
+    },
+
+    async startChat(username) {
+      return apiFetch('/api/chats', { method: 'POST', body: JSON.stringify({ username }) });
+    },
+
+    sendTyping(chatId, isTyping) {
+      if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({ type: 'typing', chatId, isTyping }));
+      }
+    },
+  };
+
+  return CONFIG.USE_MOCK ? mock : real;
+})();
