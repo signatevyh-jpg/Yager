@@ -29,7 +29,7 @@ const Auth = (() => {
           <a href="#" id="auth-switch-link">${mode === 'login' ? 'Зарегистрироваться' : 'Войти'}</a>
         </p>
 
-        <p class="auth-note">Демо-режим: данные хранятся только в этом браузере, пока не подключён бэкенд.</p>
+        <p class="auth-note">Быстрый вход: логин <b>ivan_petrov</b> или <b>anna_smirnova</b>, пароль <b>password</b>. Либо создайте новый аккаунт.</p>
       </div>
     `;
 
@@ -68,6 +68,10 @@ const Auth = (() => {
   function show() {
     document.getElementById('auth-screen').hidden = false;
     document.getElementById('app-screen').hidden = true;
+    const modal = document.getElementById('new-chat-modal');
+    if (modal) modal.hidden = true;
+    const videoModal = document.getElementById('video-circle-modal');
+    if (videoModal) videoModal.hidden = true;
     render();
   }
 

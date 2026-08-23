@@ -1,0 +1,6 @@
+{
+  "name": "Ягерь",
+  "description": "Веб-мессенджер с поддержкой текстовых, голосовых, видеосообщений (кружочки), фото и файлов в реальном времени",
+  "requestFramePermissions": ["camera", "microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

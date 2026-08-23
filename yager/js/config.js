@@ -14,14 +14,7 @@
  * только к функциям объекта PoyetAPI, а не напрямую к localStorage/fetch.
  */
 const CONFIG = {
-  // Поставьте false, когда запустите бэкенд из папки poyet-backend/
-  USE_MOCK: true,
-
-  // Адрес запущенного бэкенда. Для локального запуска через
-  // docker compose (см. poyet-backend/README.md) — это:
-  API_BASE_URL: 'http://localhost:8000',
-  WS_URL: 'ws://localhost:8000/ws',
-
-  // Для продакшена используйте https:// и wss:// — сервер должен
-  // быть развёрнут за HTTPS.
+  USE_MOCK: false,
+  API_BASE_URL: '',
+  WS_URL: `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws`,
 };

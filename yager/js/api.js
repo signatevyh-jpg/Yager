@@ -60,7 +60,13 @@ const PoyetAPI = (() => {
     return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   }
   function publicUser(user) {
-    return { id: user.id, username: user.username, displayName: user.displayName };
+    return {
+      id: user.id,
+      username: user.username,
+      displayName: user.displayName,
+      avatar: user.avatar || null,
+      bio: user.bio || "",
+    };
   }
 
   const mock = {
@@ -75,7 +81,7 @@ const PoyetAPI = (() => {
         throw new Error('Это имя пользователя уже занято');
       }
       const passwordHash = await sha256(password + '::' + username.toLowerCase());
-      const user = { id: uid('user'), username, passwordHash, displayName: username, createdAt: new Date().toISOString() };
+      const user = { id: uid('user'), username, passwordHash, displayName: username, avatar: null, bio: "", createdAt: new Date().toISOString() };
       users.push(user);
       writeJSON(LS_USERS, users);
       writeJSON(LS_SESSION, { userId: user.id });
@@ -104,6 +110,25 @@ const PoyetAPI = (() => {
       return user ? publicUser(user) : null;
     },
 
+    async updateProfile(payload = {}) {
+      const session = readJSON(LS_SESSION, null);
+      if (!session) throw new Error('Не авторизован');
+      const users = readJSON(LS_USERS, []);
+      const user = users.find(u => u.id === session.userId);
+      if (!user) throw new Error('Пользователь не найден');
+      if (payload.displayName) user.displayName = payload.displayName;
+      if (payload.avatar !== undefined) user.avatar = payload.avatar;
+      if (payload.bio !== undefined) user.bio = payload.bio;
+      writeJSON(LS_USERS, users);
+      return publicUser(user);
+    },
+
+    async getUserProfile(userId) {
+      const users = readJSON(LS_USERS, []);
+      const user = users.find(u => u.id === userId);
+      return user ? publicUser(user) : null;
+    },
+
     async getChats() {
       const session = readJSON(LS_SESSION, null);
       if (!session) return [];
@@ -114,11 +139,22 @@ const PoyetAPI = (() => {
       return readJSON(LS_MESSAGES_PREFIX + chatId, []);
     },
 
-    async sendMessage(chatId, text) {
+    async sendMessage(chatId, payload) {
       const session = readJSON(LS_SESSION, null);
       if (!session) throw new Error('Не авторизован');
       const messages = readJSON(LS_MESSAGES_PREFIX + chatId, []);
-      const message = { id: uid('msg'), chatId, senderId: session.userId, text, createdAt: new Date().toISOString(), status: 'sent' };
+      const msgObj = typeof payload === 'string' ? { text: payload } : payload;
+      const message = {
+        id: uid('msg'),
+        chatId,
+        senderId: session.userId,
+        text: msgObj.text || '',
+        createdAt: new Date().toISOString(),
+        status: 'sent',
+        mediaType: msgObj.mediaType || 'text',
+        mediaUrl: msgObj.mediaUrl,
+        mediaMeta: msgObj.mediaMeta,
+      };
       messages.push(message);
       writeJSON(LS_MESSAGES_PREFIX + chatId, messages);
       touchChat(session.userId, chatId, message);
@@ -138,6 +174,15 @@ const PoyetAPI = (() => {
       const chats = readJSON(LS_CHATS_PREFIX + (readJSON(LS_SESSION, {}) || {}).userId, []);
       const chat = chats.find(c => c.id === chatId);
       if (chat) { chat.unread = 0; writeJSON(LS_CHATS_PREFIX + readJSON(LS_SESSION, {}).userId, chats); }
+    },
+
+    async searchUsers(query = '') {
+      const users = readJSON(LS_USERS, []);
+      const current = readJSON(LS_SESSION, {}) || {};
+      const q = query.toLowerCase().trim();
+      return users
+        .filter(u => u.id !== current.userId && (!q || u.username.toLowerCase().includes(q) || (u.displayName || '').toLowerCase().includes(q)))
+        .map(u => ({ id: u.id, username: u.username, displayName: u.displayName, online: true }));
     },
 
     async startChat() {
@@ -229,13 +274,18 @@ const PoyetAPI = (() => {
       try {
         const data = JSON.parse(event.data);
         if (data.type === 'message') emit('message', { chatId: data.chatId, message: data.message });
+        else if (data.type === 'message_status') emit('message-status', { chatId: data.chatId, messageId: data.messageId, status: data.status });
         else if (data.type === 'typing') emit('typing', { chatId: data.chatId, userId: data.userId, isTyping: data.isTyping });
         else if (data.type === 'presence') emit('presence', { userId: data.userId, online: data.online });
       } catch { /* игнорируем некорректные пакеты */ }
     });
 
-    socket.addEventListener('close', () => {
+    socket.addEventListener('close', (event) => {
       socket = null;
+      if (event.code === 4401) {
+        localStorage.removeItem(LS_TOKEN);
+        return;
+      }
       const token = localStorage.getItem(LS_TOKEN);
       if (token) {
         clearTimeout(socketReconnectTimer);
@@ -295,11 +345,12 @@ const PoyetAPI = (() => {
       return apiFetch(`/api/chats/${encodeURIComponent(chatId)}/messages`);
     },
 
-    async sendMessage(chatId, text) {
+    async sendMessage(chatId, payload) {
       // Сервер сам разошлёт событие 'message' всем участникам чата через
       // WebSocket (включая отправителя) — поэтому здесь не эмитим вручную.
+      const body = typeof payload === 'string' ? { text: payload } : payload;
       return apiFetch(`/api/chats/${encodeURIComponent(chatId)}/messages`, {
-        method: 'POST', body: JSON.stringify({ text }),
+        method: 'POST', body: JSON.stringify(body),
       });
     },
 
@@ -309,6 +360,28 @@ const PoyetAPI = (() => {
 
     async startChat(username) {
       return apiFetch('/api/chats', { method: 'POST', body: JSON.stringify({ username }) });
+    },
+
+    async createGroupChat(name, memberUsernames, avatar) {
+      return apiFetch('/api/chats', {
+        method: 'POST',
+        body: JSON.stringify({ isGroup: true, name, memberUsernames, avatar }),
+      });
+    },
+
+    async updateProfile(payload) {
+      return apiFetch('/api/users/me', {
+        method: 'PATCH',
+        body: JSON.stringify(payload),
+      });
+    },
+
+    async getUserProfile(userId) {
+      return apiFetch(`/api/users/${encodeURIComponent(userId)}`);
+    },
+
+    async searchUsers(query = '') {
+      return apiFetch(`/api/users?q=${encodeURIComponent(query)}`);
     },
 
     sendTyping(chatId, isTyping) {
