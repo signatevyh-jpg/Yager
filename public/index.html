@@ -17,7 +17,7 @@
 <!-- Android/Chrome иконка -->
 <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
 
-<link rel="stylesheet" href="css/style.css?v=7">
+<link rel="stylesheet" href="css/main.css?v=8">
 </head>
 <body>
 
@@ -160,12 +160,11 @@
 <!-- Hidden File Inputs -->
 <input type="file" id="global-avatar-file-input" accept="image/*" style="display: none;" hidden>
 
-<script src="js/config.js?v=7"></script>
-<script src="js/mock-data.js?v=7"></script>
-<script src="js/api.js?v=7"></script>
-<script src="js/notifications.js?v=7"></script>
-<script src="js/auth.js?v=7"></script>
-<script src="js/app.js?v=7"></script>
+<script src="js/config.js?v=8"></script>
+<script src="js/api/apiClient.js?v=8"></script>
+<script src="js/services/notificationService.js?v=8"></script>
+<script src="js/components/auth.js?v=8"></script>
+<script src="js/main.js?v=8"></script>
 <script>
   // Immediate modal cancel handler available even before login
   document.getElementById('new-chat-cancel')?.addEventListener('click', () => {

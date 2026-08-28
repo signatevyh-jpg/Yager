@@ -1074,8 +1074,8 @@ app.post("/api/push/test", authMiddleware, async (req: AuthenticatedRequest, res
   res.json({ ok: true, activeSubscriptions: count });
 });
 
-// Serve frontend static assets from yager/ directory
-const staticDir = path.join(process.cwd(), "yager");
+// Serve frontend static assets from public/ directory
+const staticDir = path.join(process.cwd(), "public");
 app.use(express.static(staticDir));
 
 app.get("*", (req, res) => {
