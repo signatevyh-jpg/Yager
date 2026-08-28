@@ -17,17 +17,17 @@
 <!-- Android/Chrome иконка -->
 <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
 
-<link rel="stylesheet" href="css/style.css?v=3">
+<link rel="stylesheet" href="css/style.css?v=7">
 </head>
 <body>
 
 <div id="auth-screen"></div>
 
-<div id="app-screen" style="display: none;" hidden>
+<div id="app-screen" hidden>
   <div id="app">
     <div id="sidebar">
       <div id="sidebar-header">
-        <div class="brand" id="current-user-profile-trigger" style="cursor: pointer;" title="Открыть мой профиль">
+        <div class="brand" id="current-user-profile-trigger" style="cursor: pointer;" title="Мой профиль и настройки">
           <div id="current-user-avatar"></div>
           <div>
             <div id="current-user-name"></div>
@@ -37,15 +37,12 @@
         <button class="icon-btn" id="new-group-btn" title="Создать группу">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
         </button>
-        <button class="icon-btn" id="new-chat-btn" title="Новый личный чат">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
-        </button>
-        <button class="icon-btn" id="logout-btn" title="Выйти">
-          <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></svg>
+        <button class="icon-btn" id="settings-btn" title="Настройки">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
         </button>
       </div>
       <div id="search-wrap">
-        <input type="text" id="search-input" placeholder="Поиск">
+        <input type="text" id="search-input" placeholder="Поиск чатов и людей (по имени или @username)" autocomplete="off">
       </div>
       <div id="chat-list"></div>
     </div>
@@ -104,17 +101,17 @@
   </div>
 </div>
 
-<!-- Profile Modal (View and Edit) -->
+<!-- Profile and Settings Modal -->
 <div id="profile-modal" class="modal-overlay" style="display: none;" hidden>
-  <div class="modal-card" style="max-width: 420px; width: 100%;">
-    <div class="profile-modal-header">
-      <h3 id="profile-modal-title">Профиль</h3>
+  <div class="modal-card settings-modal-card">
+    <div class="settings-modal-header">
+      <h3 id="profile-modal-title" style="margin: 0; font-size: 17px; font-weight: 600;">Настройки</h3>
       <button type="button" class="icon-btn" id="profile-modal-close" title="Закрыть">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
       </button>
     </div>
     
-    <div id="profile-modal-body"></div>
+    <div id="profile-modal-body" class="settings-modal-body"></div>
   </div>
 </div>
 
@@ -142,14 +139,33 @@
   </div>
 </div>
 
+<!-- Forward Message Modal -->
+<div id="forward-modal" class="modal-overlay" style="display: none;" hidden>
+  <div class="modal-card" style="max-width: 380px; width: 100%;">
+    <div class="profile-modal-header">
+      <h3>Переслать сообщение</h3>
+      <button type="button" class="icon-btn" id="forward-modal-close" title="Закрыть">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+    
+    <div id="forward-preview-box" class="forward-preview-box"></div>
+
+    <input type="text" id="forward-search-input" placeholder="Поиск чата..." class="modal-text-input" style="margin-top: 10px;">
+    
+    <div id="forward-chats-list" class="forward-chats-list" style="margin-top: 10px; max-height: 220px; overflow-y: auto;"></div>
+  </div>
+</div>
+
 <!-- Hidden File Inputs -->
 <input type="file" id="global-avatar-file-input" accept="image/*" style="display: none;" hidden>
 
-<script src="js/config.js?v=3"></script>
-<script src="js/mock-data.js?v=3"></script>
-<script src="js/api.js?v=3"></script>
-<script src="js/auth.js?v=3"></script>
-<script src="js/app.js?v=3"></script>
+<script src="js/config.js?v=7"></script>
+<script src="js/mock-data.js?v=7"></script>
+<script src="js/api.js?v=7"></script>
+<script src="js/notifications.js?v=7"></script>
+<script src="js/auth.js?v=7"></script>
+<script src="js/app.js?v=7"></script>
 <script>
   // Immediate modal cancel handler available even before login
   document.getElementById('new-chat-cancel')?.addEventListener('click', () => {
@@ -160,15 +176,16 @@
     }
   });
 
-  if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.getRegistrations().then((regs) => {
-      for (const reg of regs) {
-        reg.unregister();
-      }
-    });
-  }
-
   (async () => {
+    // Initialize cross-platform notification engine and Service Worker
+    try {
+      if (window.Notifications && typeof window.Notifications.init === 'function') {
+        await window.Notifications.init();
+      }
+    } catch (e) {
+      console.warn('Notifications init error:', e);
+    }
+
     try {
       const user = await PoyetAPI.getCurrentUser();
       if (user) {

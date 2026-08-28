@@ -6,9 +6,26 @@ import cors from "cors";
 import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
 import { randomUUID } from "crypto";
+import webpush from "web-push";
 
 const PORT = 3000;
 const JWT_SECRET = process.env.JWT_SECRET || "yager-secret-key-development-ai-studio";
+
+// Setup VAPID keys for Web Push Notifications (Apple, Android, Windows, Linux, macOS)
+let vapidKeys = {
+  publicKey: process.env.VAPID_PUBLIC_KEY || "",
+  privateKey: process.env.VAPID_PRIVATE_KEY || "",
+};
+
+if (!vapidKeys.publicKey || !vapidKeys.privateKey) {
+  vapidKeys = webpush.generateVAPIDKeys();
+}
+
+webpush.setVapidDetails(
+  "mailto:support@yager.app",
+  vapidKeys.publicKey,
+  vapidKeys.privateKey
+);
 
 interface UserRecord {
   id: string;
@@ -49,6 +66,19 @@ interface MessageRecord {
     fileSize?: number;
     mimeType?: string;
   };
+  replyTo?: {
+    id: string;
+    senderName: string;
+    text: string;
+    mediaType?: string;
+  };
+  forwardedFrom?: {
+    senderName: string;
+    chatName?: string;
+  };
+  reactions?: Record<string, string[]>;
+  isEdited?: boolean;
+  editedAt?: string;
 }
 
 // In-Memory Data Store
@@ -56,6 +86,77 @@ const users = new Map<string, UserRecord>();
 const chats = new Map<string, ChatRecord>();
 const participants = new Map<string, ChatParticipantRecord>();
 const messages: MessageRecord[] = [];
+
+// Push Subscriptions Store (userId -> Map<endpoint, subscriptionObject>)
+interface StoredSubscription {
+  subscription: webpush.PushSubscription;
+  device?: string;
+  userAgent?: string;
+  createdAt: string;
+}
+const pushSubscriptions = new Map<string, Map<string, StoredSubscription>>();
+
+function savePushSubscription(userId: string, sub: webpush.PushSubscription, userAgent?: string) {
+  if (!pushSubscriptions.has(userId)) {
+    pushSubscriptions.set(userId, new Map());
+  }
+  const userSubs = pushSubscriptions.get(userId)!;
+  userSubs.set(sub.endpoint, {
+    subscription: sub,
+    userAgent,
+    createdAt: new Date().toISOString(),
+  });
+}
+
+function removePushSubscription(userId: string, endpoint: string) {
+  const userSubs = pushSubscriptions.get(userId);
+  if (userSubs) {
+    userSubs.delete(endpoint);
+    if (userSubs.size === 0) {
+      pushSubscriptions.delete(userId);
+    }
+  }
+}
+
+async function sendPushToUsers(
+  userIds: string[],
+  notificationData: {
+    title: string;
+    body: string;
+    icon?: string;
+    badge?: string;
+    tag?: string;
+    data?: Record<string, unknown>;
+  }
+) {
+  const payloadString = JSON.stringify({
+    title: notificationData.title,
+    body: notificationData.body,
+    icon: notificationData.icon || "/icons/icon-192.png",
+    badge: notificationData.badge || "/icons/icon-192.png",
+    tag: notificationData.tag || "yager-notification",
+    data: notificationData.data || { url: "/" },
+  });
+
+  for (const uid of userIds) {
+    const userSubs = pushSubscriptions.get(uid);
+    if (!userSubs || userSubs.size === 0) continue;
+
+    for (const [endpoint, storedSub] of userSubs.entries()) {
+      try {
+        await webpush.sendNotification(storedSub.subscription, payloadString);
+      } catch (err: any) {
+        // If subscription is expired or unsubscribed, remove it
+        if (err && (err.statusCode === 404 || err.statusCode === 410)) {
+          userSubs.delete(endpoint);
+        }
+      }
+    }
+    if (userSubs.size === 0) {
+      pushSubscriptions.delete(uid);
+    }
+  }
+}
 
 // WebSocket Connection Manager
 class WSManager {
@@ -182,11 +283,17 @@ seedInitialData();
 
 // Helper Functions
 function findUserByUsername(username: string): UserRecord | undefined {
-  const norm = username.trim().toLowerCase();
+  const norm = username.trim().replace(/^@/, "").toLowerCase();
   for (const u of users.values()) {
     if (u.username.toLowerCase() === norm) return u;
   }
   return undefined;
+}
+
+function findUserByIdOrUsername(idOrUsername: string): UserRecord | undefined {
+  const trimmed = idOrUsername.trim().replace(/^@/, "");
+  if (users.has(trimmed)) return users.get(trimmed);
+  return findUserByUsername(trimmed);
 }
 
 function getChatParticipants(chatId: string): ChatParticipantRecord[] {
@@ -319,12 +426,19 @@ app.get("/api/health", (req, res) => {
 });
 
 app.post("/api/auth/register", (req, res) => {
-  const { username, password } = req.body || {};
-  const trimmed = typeof username === "string" ? username.trim() : "";
+  const { username, password, displayName } = req.body || {};
+  const rawUsername = typeof username === "string" ? username.trim().replace(/^@/, "") : "";
+  const trimmedUsername = rawUsername.toLowerCase();
+  const rawDisplayName = typeof displayName === "string" ? displayName.trim() : "";
+  const finalDisplayName = rawDisplayName ? rawDisplayName.slice(0, 50) : rawUsername;
   const pwd = typeof password === "string" ? password : "";
 
-  if (trimmed.length < 3) {
-    res.status(400).json({ detail: "Имя пользователя — минимум 3 символа" });
+  if (trimmedUsername.length < 3) {
+    res.status(400).json({ detail: "Юз (username) — минимум 3 символа" });
+    return;
+  }
+  if (!/^[a-zA-Z0-9_.-]+$/.test(trimmedUsername)) {
+    res.status(400).json({ detail: "Юз может содержать только латинские буквы, цифры, дефис и подчеркивание" });
     return;
   }
   if (pwd.length < 4) {
@@ -332,15 +446,15 @@ app.post("/api/auth/register", (req, res) => {
     return;
   }
 
-  if (findUserByUsername(trimmed)) {
-    res.status(400).json({ detail: "Это имя пользователя уже занято" });
+  if (findUserByUsername(trimmedUsername)) {
+    res.status(400).json({ detail: "Этот юз уже занят другим пользователем" });
     return;
   }
 
   const user: UserRecord = {
     id: `user_${randomUUID().slice(0, 8)}`,
-    username: trimmed,
-    displayName: trimmed,
+    username: trimmedUsername,
+    displayName: finalDisplayName || trimmedUsername,
     passwordHash: bcrypt.hashSync(pwd, 10),
     createdAt: new Date().toISOString(),
   };
@@ -361,12 +475,12 @@ app.post("/api/auth/register", (req, res) => {
 
 app.post("/api/auth/login", (req, res) => {
   const { username, password } = req.body || {};
-  const trimmed = typeof username === "string" ? username.trim() : "";
+  const trimmed = typeof username === "string" ? username.trim().replace(/^@/, "").toLowerCase() : "";
   const pwd = typeof password === "string" ? password : "";
 
   const user = findUserByUsername(trimmed);
   if (!user || !bcrypt.compareSync(pwd, user.passwordHash)) {
-    res.status(400).json({ detail: "Неверное имя пользователя или пароль" });
+    res.status(400).json({ detail: "Неверный юз или пароль" });
     return;
   }
 
@@ -435,7 +549,9 @@ app.get("/api/users/:userId", authMiddleware, (req: AuthenticatedRequest, res: R
 
 app.get("/api/users", authMiddleware, (req: AuthenticatedRequest, res: Response) => {
   const currentUser = req.user!;
-  const query = typeof req.query.q === "string" ? req.query.q.trim().toLowerCase() : "";
+  const rawQ = typeof req.query.q === "string" ? req.query.q.trim() : "";
+  const query = rawQ.toLowerCase();
+  const cleanQ = query.replace(/^@/, "");
   if (!query) {
     res.json([]);
     return;
@@ -444,9 +560,12 @@ app.get("/api/users", authMiddleware, (req: AuthenticatedRequest, res: Response)
 
   for (const u of users.values()) {
     if (u.id === currentUser.id) continue;
+    const uName = u.username.toLowerCase();
+    const dName = u.displayName.toLowerCase();
     if (
-      u.username.toLowerCase().includes(query) ||
-      u.displayName.toLowerCase().includes(query)
+      uName.includes(cleanQ) ||
+      dName.includes(query) ||
+      dName.includes(cleanQ)
     ) {
       list.push({
         id: u.id,
@@ -478,7 +597,7 @@ app.get("/api/chats", authMiddleware, (req: AuthenticatedRequest, res: Response)
 
 app.post("/api/chats", authMiddleware, (req: AuthenticatedRequest, res: Response) => {
   const user = req.user!;
-  const { username, isGroup, name, avatar, memberUsernames } = req.body || {};
+  const { username, userId, isGroup, name, avatar, memberUsernames } = req.body || {};
 
   // Group chat creation
   if (isGroup) {
@@ -488,7 +607,7 @@ app.post("/api/chats", authMiddleware, (req: AuthenticatedRequest, res: Response
 
     const memberUsers = [user];
     for (const uName of usernamesList) {
-      const found = findUserByUsername(String(uName).trim());
+      const found = findUserByIdOrUsername(String(uName).trim());
       if (found && !memberUsers.some((m) => m.id === found.id)) {
         memberUsers.push(found);
       }
@@ -529,11 +648,15 @@ app.post("/api/chats", authMiddleware, (req: AuthenticatedRequest, res: Response
   }
 
   // 1-on-1 chat creation
-  const targetUsername = typeof username === "string" ? username.trim() : "";
+  let target: UserRecord | undefined;
+  if (typeof userId === "string" && userId.trim() && users.has(userId.trim())) {
+    target = users.get(userId.trim());
+  } else if (typeof username === "string" && username.trim()) {
+    target = findUserByIdOrUsername(username.trim());
+  }
 
-  const target = findUserByUsername(targetUsername);
   if (!target) {
-    res.status(404).json({ detail: "Пользователь с таким именем не найден" });
+    res.status(404).json({ detail: "Пользователь не найден" });
     return;
   }
   if (target.id === user.id) {
@@ -614,6 +737,11 @@ app.get("/api/chats/:chatId/messages", authMiddleware, (req: AuthenticatedReques
         mediaType: m.mediaType || "text",
         mediaUrl: m.mediaUrl,
         mediaMeta: m.mediaMeta,
+        replyTo: m.replyTo,
+        forwardedFrom: m.forwardedFrom,
+        reactions: m.reactions || {},
+        isEdited: m.isEdited,
+        editedAt: m.editedAt,
       };
     });
 
@@ -623,7 +751,7 @@ app.get("/api/chats/:chatId/messages", authMiddleware, (req: AuthenticatedReques
 app.post("/api/chats/:chatId/messages", authMiddleware, (req: AuthenticatedRequest, res: Response) => {
   const user = req.user!;
   const chatId = req.params.chatId;
-  const { text, mediaType, mediaUrl, mediaMeta } = req.body || {};
+  const { text, mediaType, mediaUrl, mediaMeta, replyTo, forwardedFrom } = req.body || {};
   const msgText = typeof text === "string" ? text.trim() : "";
   const validMediaType = mediaType || "text";
 
@@ -648,6 +776,9 @@ app.post("/api/chats/:chatId/messages", authMiddleware, (req: AuthenticatedReque
     mediaType: validMediaType,
     mediaUrl: typeof mediaUrl === "string" ? mediaUrl : undefined,
     mediaMeta: mediaMeta && typeof mediaMeta === "object" ? mediaMeta : undefined,
+    replyTo: replyTo && typeof replyTo === "object" ? replyTo : undefined,
+    forwardedFrom: forwardedFrom && typeof forwardedFrom === "object" ? forwardedFrom : undefined,
+    reactions: {},
   };
   messages.push(msg);
 
@@ -667,6 +798,11 @@ app.post("/api/chats/:chatId/messages", authMiddleware, (req: AuthenticatedReque
     mediaType: msg.mediaType || "text",
     mediaUrl: msg.mediaUrl,
     mediaMeta: msg.mediaMeta,
+    replyTo: msg.replyTo,
+    forwardedFrom: msg.forwardedFrom,
+    reactions: msg.reactions || {},
+    isEdited: msg.isEdited,
+    editedAt: msg.editedAt,
   };
 
   const participantUserIds = parts.map((p) => p.userId);
@@ -676,7 +812,189 @@ app.post("/api/chats/:chatId/messages", authMiddleware, (req: AuthenticatedReque
     message: outMessage,
   });
 
+  // Trigger Web Push notifications to other participants (cross-platform Apple/Android/Windows/Linux)
+  const otherUserIds = parts.filter((p) => p.userId !== user.id).map((p) => p.userId);
+  if (otherUserIds.length > 0) {
+    const chat = chats.get(chatId);
+    let title = user.displayName;
+    if (chat && chat.isGroup) {
+      title = `${chat.name || "Группа"} (${user.displayName})`;
+    }
+
+    let body = msg.text || "Новое сообщение";
+    if (msg.mediaType === "voice") {
+      const dur = msg.mediaMeta?.duration ? ` (${Math.floor(msg.mediaMeta.duration / 60)}:${String(msg.mediaMeta.duration % 60).padStart(2, "0")})` : "";
+      body = `🎤 Голосовое сообщение${dur}`;
+    } else if (msg.mediaType === "round_video") {
+      body = "🔘 Видеосообщение (кружочек)";
+    } else if (msg.mediaType === "image") {
+      body = msg.text ? `📷 Фото: ${msg.text}` : "📷 Фотография";
+    } else if (msg.mediaType === "video") {
+      body = msg.text ? `📹 Видео: ${msg.text}` : "📹 Видеозапись";
+    } else if (msg.mediaType === "file") {
+      body = `📎 Файл: ${msg.mediaMeta?.fileName || "документ"}`;
+    }
+
+    sendPushToUsers(otherUserIds, {
+      title,
+      body,
+      icon: user.avatar || (chat?.isGroup ? chat.avatar || "/icons/icon-192.png" : "/icons/icon-192.png"),
+      badge: "/icons/icon-192.png",
+      tag: `chat_${chatId}`,
+      data: {
+        chatId,
+        messageId: msg.id,
+        url: `/?chat=${encodeURIComponent(chatId)}`,
+      },
+    }).catch(() => {});
+  }
+
   res.json(outMessage);
+});
+
+app.patch("/api/chats/:chatId/messages/:messageId", authMiddleware, (req: AuthenticatedRequest, res: Response) => {
+  const user = req.user!;
+  const { chatId, messageId } = req.params;
+  const { text } = req.body || {};
+
+  const parts = getChatParticipants(chatId);
+  const isPart = parts.some((p) => p.userId === user.id);
+  if (!isPart) {
+    res.status(403).json({ detail: "Нет доступа к этому чату" });
+    return;
+  }
+
+  const msg = messages.find((m) => m.id === messageId && m.chatId === chatId);
+  if (!msg) {
+    res.status(404).json({ detail: "Сообщение не найдено" });
+    return;
+  }
+
+  if (msg.senderId !== user.id) {
+    res.status(403).json({ detail: "Можно редактировать только свои сообщения" });
+    return;
+  }
+
+  const newText = typeof text === "string" ? text.trim() : "";
+  if (!newText && !msg.mediaUrl) {
+    res.status(400).json({ detail: "Текст сообщения не может быть пустым" });
+    return;
+  }
+
+  msg.text = newText;
+  msg.isEdited = true;
+  msg.editedAt = new Date().toISOString();
+
+  const outMessage = {
+    id: msg.id,
+    chatId: msg.chatId,
+    senderId: msg.senderId,
+    text: msg.text,
+    createdAt: msg.createdAt,
+    status: "sent",
+    mediaType: msg.mediaType || "text",
+    mediaUrl: msg.mediaUrl,
+    mediaMeta: msg.mediaMeta,
+    replyTo: msg.replyTo,
+    forwardedFrom: msg.forwardedFrom,
+    isEdited: true,
+    editedAt: msg.editedAt,
+  };
+
+  const participantUserIds = parts.map((p) => p.userId);
+  wsManager.sendToUsers(participantUserIds, {
+    type: "message_edit",
+    chatId,
+    message: outMessage,
+  });
+
+  res.json(outMessage);
+});
+
+app.delete("/api/chats/:chatId/messages/:messageId", authMiddleware, (req: AuthenticatedRequest, res: Response) => {
+  const user = req.user!;
+  const { chatId, messageId } = req.params;
+
+  const parts = getChatParticipants(chatId);
+  const isPart = parts.some((p) => p.userId === user.id);
+  if (!isPart) {
+    res.status(403).json({ detail: "Нет доступа к этому чату" });
+    return;
+  }
+
+  const msgIdx = messages.findIndex((m) => m.id === messageId && m.chatId === chatId);
+  if (msgIdx === -1) {
+    res.status(404).json({ detail: "Сообщение не найдено" });
+    return;
+  }
+
+  // Delete message for all participants
+  messages.splice(msgIdx, 1);
+
+  const participantUserIds = parts.map((p) => p.userId);
+  wsManager.sendToUsers(participantUserIds, {
+    type: "message_delete",
+    chatId,
+    messageId,
+  });
+
+  res.json({ ok: true, messageId });
+});
+
+app.post("/api/chats/:chatId/messages/:messageId/reactions", authMiddleware, (req: AuthenticatedRequest, res: Response) => {
+  const user = req.user!;
+  const { chatId, messageId } = req.params;
+  const { emoji } = req.body || {};
+
+  const parts = getChatParticipants(chatId);
+  const isPart = parts.some((p) => p.userId === user.id);
+  if (!isPart) {
+    res.status(403).json({ detail: "Нет доступа к этому чату" });
+    return;
+  }
+
+  const msg = messages.find((m) => m.id === messageId && m.chatId === chatId);
+  if (!msg) {
+    res.status(404).json({ detail: "Сообщение не найдено" });
+    return;
+  }
+
+  if (typeof emoji !== "string" || !emoji.trim()) {
+    res.status(400).json({ detail: "Не указан эмодзи для реакции" });
+    return;
+  }
+
+  const cleanEmoji = emoji.trim();
+  if (!msg.reactions) {
+    msg.reactions = {};
+  }
+
+  const userList = msg.reactions[cleanEmoji] || [];
+  const existingIdx = userList.indexOf(user.id);
+
+  if (existingIdx !== -1) {
+    userList.splice(existingIdx, 1);
+    if (userList.length === 0) {
+      delete msg.reactions[cleanEmoji];
+    } else {
+      msg.reactions[cleanEmoji] = userList;
+    }
+  } else {
+    userList.push(user.id);
+    msg.reactions[cleanEmoji] = userList;
+  }
+
+  const participantUserIds = parts.map((p) => p.userId);
+  wsManager.sendToUsers(participantUserIds, {
+    type: "message_reaction",
+    chatId,
+    messageId,
+    reactions: msg.reactions || {},
+    userId: user.id,
+    emoji: cleanEmoji,
+  });
+
+  res.json({ ok: true, reactions: msg.reactions || {} });
 });
 
 app.post("/api/chats/:chatId/read", authMiddleware, (req: AuthenticatedRequest, res: Response) => {
@@ -706,6 +1024,54 @@ app.post("/api/chats/:chatId/read", authMiddleware, (req: AuthenticatedRequest, 
   }
 
   res.json({ ok: true });
+});
+
+// Push Notifications API endpoints
+app.get("/api/push/vapid-public-key", (req, res) => {
+  res.json({ publicKey: vapidKeys.publicKey });
+});
+
+app.post("/api/push/subscribe", authMiddleware, (req: AuthenticatedRequest, res: Response) => {
+  const user = req.user!;
+  const { subscription, device } = req.body || {};
+
+  if (!subscription || !subscription.endpoint || !subscription.keys) {
+    res.status(400).json({ detail: "Некорректный объект подписки Push" });
+    return;
+  }
+
+  const userAgent = req.headers["user-agent"] || device || "Unknown Device";
+  savePushSubscription(user.id, subscription, userAgent);
+  res.json({ ok: true, message: "Подписка на Push-уведомления успешно сохранена" });
+});
+
+app.post("/api/push/unsubscribe", authMiddleware, (req: AuthenticatedRequest, res: Response) => {
+  const user = req.user!;
+  const { endpoint } = req.body || {};
+
+  if (typeof endpoint === "string" && endpoint) {
+    removePushSubscription(user.id, endpoint);
+  }
+  res.json({ ok: true });
+});
+
+app.post("/api/push/test", authMiddleware, async (req: AuthenticatedRequest, res: Response) => {
+  const user = req.user!;
+  const userSubs = pushSubscriptions.get(user.id);
+  const count = userSubs ? userSubs.size : 0;
+
+  if (count > 0) {
+    await sendPushToUsers([user.id], {
+      title: "Ягерь — Тестовое уведомление",
+      body: "Уведомления на вашем устройстве работают отлично! 🚀",
+      icon: "/icons/icon-192.png",
+      badge: "/icons/icon-192.png",
+      tag: "test_push",
+      data: { url: "/" },
+    });
+  }
+
+  res.json({ ok: true, activeSubscriptions: count });
 });
 
 // Serve frontend static assets from yager/ directory

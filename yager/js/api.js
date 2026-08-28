@@ -31,6 +31,9 @@ const PoyetAPI = (() => {
   const shared = {
     onMessage: (handler) => on('message', handler),
     onMessageStatus: (handler) => on('message-status', handler),
+    onMessageEdit: (handler) => on('message-edit', handler),
+    onMessageDelete: (handler) => on('message-delete', handler),
+    onMessageReaction: (handler) => on('message-reaction', handler),
     onTyping: (handler) => on('typing', handler),
     onPresence: (handler) => on('presence', handler),
   };
@@ -72,16 +75,17 @@ const PoyetAPI = (() => {
   const mock = {
     ...shared,
 
-    async register(username, password) {
-      username = username.trim();
-      if (username.length < 3) throw new Error('Имя пользователя — минимум 3 символа');
+    async register(username, password, displayName) {
+      username = username.trim().replace(/^@/, '');
+      displayName = (displayName || '').trim() || username;
+      if (username.length < 3) throw new Error('Юз (username) — минимум 3 символа');
       if (password.length < 4) throw new Error('Пароль — минимум 4 символа');
       const users = readJSON(LS_USERS, []);
       if (users.some(u => u.username.toLowerCase() === username.toLowerCase())) {
-        throw new Error('Это имя пользователя уже занято');
+        throw new Error('Этот юз уже занят другим пользователем');
       }
       const passwordHash = await sha256(password + '::' + username.toLowerCase());
-      const user = { id: uid('user'), username, passwordHash, displayName: username, avatar: null, bio: "", createdAt: new Date().toISOString() };
+      const user = { id: uid('user'), username, passwordHash, displayName, avatar: null, bio: "", createdAt: new Date().toISOString() };
       users.push(user);
       writeJSON(LS_USERS, users);
       writeJSON(LS_SESSION, { userId: user.id });
@@ -154,6 +158,8 @@ const PoyetAPI = (() => {
         mediaType: msgObj.mediaType || 'text',
         mediaUrl: msgObj.mediaUrl,
         mediaMeta: msgObj.mediaMeta,
+        replyTo: msgObj.replyTo,
+        forwardedFrom: msgObj.forwardedFrom,
       };
       messages.push(message);
       writeJSON(LS_MESSAGES_PREFIX + chatId, messages);
@@ -168,6 +174,49 @@ const PoyetAPI = (() => {
 
       maybeAutoReply(session.userId, chatId);
       return message;
+    },
+
+    async editMessage(chatId, messageId, text) {
+      const messages = readJSON(LS_MESSAGES_PREFIX + chatId, []);
+      const msg = messages.find(m => m.id === messageId);
+      if (!msg) throw new Error('Сообщение не найдено');
+      msg.text = text;
+      msg.isEdited = true;
+      msg.editedAt = new Date().toISOString();
+      writeJSON(LS_MESSAGES_PREFIX + chatId, messages);
+      emit('message-edit', { chatId, message: msg });
+      return msg;
+    },
+
+    async deleteMessage(chatId, messageId) {
+      let messages = readJSON(LS_MESSAGES_PREFIX + chatId, []);
+      messages = messages.filter(m => m.id !== messageId);
+      writeJSON(LS_MESSAGES_PREFIX + chatId, messages);
+      emit('message-delete', { chatId, messageId });
+      return { ok: true, messageId };
+    },
+
+    async toggleReaction(chatId, messageId, emoji) {
+      const session = readJSON(LS_SESSION, null);
+      if (!session) throw new Error('Не авторизован');
+      const messages = readJSON(LS_MESSAGES_PREFIX + chatId, []);
+      const msg = messages.find(m => m.id === messageId);
+      if (!msg) throw new Error('Сообщение не найдено');
+      if (!msg.reactions) msg.reactions = {};
+      const cleanEmoji = emoji.trim();
+      const list = msg.reactions[cleanEmoji] || [];
+      const idx = list.indexOf(session.userId);
+      if (idx !== -1) {
+        list.splice(idx, 1);
+        if (list.length === 0) delete msg.reactions[cleanEmoji];
+        else msg.reactions[cleanEmoji] = list;
+      } else {
+        list.push(session.userId);
+        msg.reactions[cleanEmoji] = list;
+      }
+      writeJSON(LS_MESSAGES_PREFIX + chatId, messages);
+      emit('message-reaction', { chatId, messageId, reactions: msg.reactions, userId: session.userId, emoji: cleanEmoji });
+      return { ok: true, reactions: msg.reactions };
     },
 
     async markRead(chatId) {
@@ -275,6 +324,9 @@ const PoyetAPI = (() => {
         const data = JSON.parse(event.data);
         if (data.type === 'message') emit('message', { chatId: data.chatId, message: data.message });
         else if (data.type === 'message_status') emit('message-status', { chatId: data.chatId, messageId: data.messageId, status: data.status });
+        else if (data.type === 'message_edit') emit('message-edit', { chatId: data.chatId, message: data.message });
+        else if (data.type === 'message_delete') emit('message-delete', { chatId: data.chatId, messageId: data.messageId });
+        else if (data.type === 'message_reaction') emit('message-reaction', { chatId: data.chatId, messageId: data.messageId, reactions: data.reactions, userId: data.userId, emoji: data.emoji });
         else if (data.type === 'typing') emit('typing', { chatId: data.chatId, userId: data.userId, isTyping: data.isTyping });
         else if (data.type === 'presence') emit('presence', { userId: data.userId, online: data.online });
       } catch { /* игнорируем некорректные пакеты */ }
@@ -302,9 +354,9 @@ const PoyetAPI = (() => {
   const real = {
     ...shared,
 
-    async register(username, password) {
+    async register(username, password, displayName) {
       const { token, user } = await apiFetch('/api/auth/register', {
-        method: 'POST', body: JSON.stringify({ username, password }),
+        method: 'POST', body: JSON.stringify({ username, password, displayName }),
       });
       localStorage.setItem(LS_TOKEN, token);
       connectSocket();
@@ -354,12 +406,35 @@ const PoyetAPI = (() => {
       });
     },
 
+    async editMessage(chatId, messageId, text) {
+      return apiFetch(`/api/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ text }),
+      });
+    },
+
+    async deleteMessage(chatId, messageId) {
+      return apiFetch(`/api/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}`, {
+        method: 'DELETE',
+      });
+    },
+
+    async toggleReaction(chatId, messageId, emoji) {
+      return apiFetch(`/api/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}/reactions`, {
+        method: 'POST',
+        body: JSON.stringify({ emoji }),
+      });
+    },
+
     async markRead(chatId) {
       return apiFetch(`/api/chats/${encodeURIComponent(chatId)}/read`, { method: 'POST' });
     },
 
-    async startChat(username) {
-      return apiFetch('/api/chats', { method: 'POST', body: JSON.stringify({ username }) });
+    async startChat(usernameOrId) {
+      return apiFetch('/api/chats', {
+        method: 'POST',
+        body: JSON.stringify({ username: usernameOrId, userId: usernameOrId }),
+      });
     },
 
     async createGroupChat(name, memberUsernames, avatar) {
@@ -388,6 +463,31 @@ const PoyetAPI = (() => {
       if (socket && socket.readyState === WebSocket.OPEN) {
         socket.send(JSON.stringify({ type: 'typing', chatId, isTyping }));
       }
+    },
+
+    async getVapidPublicKey() {
+      const res = await apiFetch('/api/push/vapid-public-key');
+      return res.publicKey;
+    },
+
+    async subscribePush(subscription, device) {
+      return apiFetch('/api/push/subscribe', {
+        method: 'POST',
+        body: JSON.stringify({ subscription, device }),
+      });
+    },
+
+    async unsubscribePush(endpoint) {
+      return apiFetch('/api/push/unsubscribe', {
+        method: 'POST',
+        body: JSON.stringify({ endpoint }),
+      });
+    },
+
+    async testPushNotification() {
+      return apiFetch('/api/push/test', {
+        method: 'POST',
+      });
     },
   };
 
