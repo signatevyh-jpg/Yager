@@ -1,6 +1,4 @@
-
 const bus = new EventTarget();
-
 function emit(type, detail) {
   bus.dispatchEvent(new CustomEvent(type, { detail }));
 }
@@ -86,30 +84,80 @@ function disconnectSocket() {
   if (socket) { socket.close(); socket = null; }
 }
 
+let firebaseAuth = null;
+async function getFirebaseAuth() {
+  if (firebaseAuth) return firebaseAuth;
+  const [{ initializeApp }, { getAuth, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut }] = await Promise.all([
+    import('https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js'),
+    import('https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js')
+  ]);
+  const res = await fetch('/api/firebase-config');
+  const config = await res.json();
+  const app = initializeApp(config);
+  firebaseAuth = {
+    auth: getAuth(app),
+    signInWithEmailAndPassword,
+    createUserWithEmailAndPassword,
+    signOut
+  };
+  return firebaseAuth;
+}
+
 const PoyetAPI = {
   ...shared,
 
   async register(username, password, displayName) {
-    const { token, user } = await apiFetch('/api/auth/register', {
-      method: 'POST', body: JSON.stringify({ username, password, displayName }),
-    });
-    localStorage.setItem(LS_TOKEN, token);
-    connectSocket();
-    return user;
+    const fb = await getFirebaseAuth();
+    const email = `${username.replace(/^@/, '')}@yager.local`;
+    
+    // Register in Firebase
+    try {
+      const userCredential = await fb.createUserWithEmailAndPassword(fb.auth, email, password);
+      const token = await userCredential.user.getIdToken();
+      localStorage.setItem(LS_TOKEN, token);
+
+      // Register in backend
+      const { user } = await apiFetch('/api/auth/register', {
+        method: 'POST', body: JSON.stringify({ username, displayName }),
+      });
+      connectSocket();
+      return user;
+    } catch (err) {
+      if (err.code === 'auth/email-already-in-use') {
+        throw new Error('Такой юз уже занят');
+      }
+      throw new Error(err.message || 'Ошибка регистрации');
+    }
   },
 
   async login(username, password) {
-    const { token, user } = await apiFetch('/api/auth/login', {
-      method: 'POST', body: JSON.stringify({ username, password }),
-    });
-    localStorage.setItem(LS_TOKEN, token);
-    connectSocket();
-    return user;
+    const fb = await getFirebaseAuth();
+    const email = `${username.replace(/^@/, '')}@yager.local`;
+    
+    try {
+      const userCredential = await fb.signInWithEmailAndPassword(fb.auth, email, password);
+      const token = await userCredential.user.getIdToken();
+      localStorage.setItem(LS_TOKEN, token);
+
+      const { user } = await apiFetch('/api/auth/login', {
+        method: 'POST', body: JSON.stringify({ username }),
+      });
+      connectSocket();
+      return user;
+    } catch (err) {
+      throw new Error('Неверный юз или пароль');
+    }
   },
 
   async logout() {
     disconnectSocket();
     localStorage.removeItem(LS_TOKEN);
+    try {
+      const fb = await getFirebaseAuth();
+      await fb.signOut(fb.auth);
+    } catch (e) {
+      // ignore
+    }
   },
 
   async getCurrentUser() {
@@ -124,74 +172,46 @@ const PoyetAPI = {
     }
   },
 
-  async getChats() {
-    return apiFetch('/api/chats');
-  },
-
-  async getMessages(chatId) {
-    return apiFetch(`/api/chats/${encodeURIComponent(chatId)}/messages`);
-  },
-
+  async getChats() { return apiFetch('/api/chats'); },
+  async getMessages(chatId) { return apiFetch(`/api/chats/${encodeURIComponent(chatId)}/messages`); },
   async sendMessage(chatId, payload) {
     const body = typeof payload === 'string' ? { text: payload } : payload;
     return apiFetch(`/api/chats/${encodeURIComponent(chatId)}/messages`, {
       method: 'POST', body: JSON.stringify(body),
     });
   },
-
   async editMessage(chatId, messageId, text) {
     return apiFetch(`/api/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}`, {
-      method: 'PATCH',
-      body: JSON.stringify({ text }),
+      method: 'PATCH', body: JSON.stringify({ text }),
     });
   },
-
   async deleteMessage(chatId, messageId) {
-    return apiFetch(`/api/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}`, {
-      method: 'DELETE',
-    });
+    return apiFetch(`/api/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}`, { method: 'DELETE' });
   },
-
   async toggleReaction(chatId, messageId, emoji) {
     return apiFetch(`/api/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}/reactions`, {
-      method: 'POST',
-      body: JSON.stringify({ emoji }),
+      method: 'POST', body: JSON.stringify({ emoji }),
     });
   },
-
-  async markRead(chatId) {
-    return apiFetch(`/api/chats/${encodeURIComponent(chatId)}/read`, { method: 'POST' });
-  },
-
+  async markRead(chatId) { return apiFetch(`/api/chats/${encodeURIComponent(chatId)}/read`, { method: 'POST' }); },
   async startChat(usernameOrId) {
     return apiFetch('/api/chats', {
-      method: 'POST',
-      body: JSON.stringify({ username: usernameOrId, userId: usernameOrId }),
+      method: 'POST', body: JSON.stringify({ username: usernameOrId, userId: usernameOrId }),
     });
   },
-
   async createGroupChat(name, memberUsernames, avatar) {
     return apiFetch('/api/chats', {
-      method: 'POST',
-      body: JSON.stringify({ isGroup: true, name, memberUsernames, avatar }),
+      method: 'POST', body: JSON.stringify({ isGroup: true, name, memberUsernames, avatar }),
     });
   },
-
   async updateProfile(payload) {
     return apiFetch('/api/users/me', {
-      method: 'PATCH',
-      body: JSON.stringify(payload),
+      method: 'PATCH', body: JSON.stringify(payload),
     });
   },
-
-  async getUserProfile(userId) {
-    return apiFetch(`/api/users/${encodeURIComponent(userId)}`);
-  },
-
-  async searchUsers(query = '') {
-    return apiFetch(`/api/users?q=${encodeURIComponent(query)}`);
-  },
-
+  async getUserProfile(userId) { return apiFetch(`/api/users/${encodeURIComponent(userId)}`); },
+  async searchUsers(query = '') { return apiFetch(`/api/users?q=${encodeURIComponent(query)}`); },
+  
   sendTyping(chatId, isTyping) {
     if (socket && socket.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify({ type: 'typing', chatId, isTyping }));
@@ -202,25 +222,17 @@ const PoyetAPI = {
     const res = await apiFetch('/api/push/vapid-public-key');
     return res.publicKey;
   },
-
   async subscribePush(subscription, device) {
     return apiFetch('/api/push/subscribe', {
-      method: 'POST',
-      body: JSON.stringify({ subscription, device }),
+      method: 'POST', body: JSON.stringify({ subscription, device }),
     });
   },
-
   async unsubscribePush(endpoint) {
     return apiFetch('/api/push/unsubscribe', {
-      method: 'POST',
-      body: JSON.stringify({ endpoint }),
+      method: 'POST', body: JSON.stringify({ endpoint }),
     });
   },
-
-  async testPushNotification() {
-    return apiFetch('/api/push/test', {
-      method: 'POST',
-    });
-  },
+  async testPushNotification() { return apiFetch('/api/push/test', { method: 'POST' }); },
 };
+
 window.PoyetAPI = PoyetAPI;
